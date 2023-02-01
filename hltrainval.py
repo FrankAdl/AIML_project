@@ -68,10 +68,8 @@ DATASET = 'AIML_Image_Matting'
 DATA_DIR = '/home/xiufeng/Code'
 EXP = 'indexnet_matting'
 DATA_LIST = './train_fg.txt'
-# DATA_VAL_LIST = './train_alpha.txt'
 DATA_VAL_LIST = './test.txt'
 RESTORE_FROM = 'model_ckpt.pth.tar'
-# RESTORE_FROM = 'indexnet_matting.pth.tar'
 SNAPSHOT_DIR = './snapshots'
 RESULT_DIR = './results'
 
@@ -81,7 +79,6 @@ CONV_OPERATOR = 'std_conv' # choose in ['std_conv', 'dep_sep_conv']
 DECODER = 'indexnet' # choose in ['unet_style', 'deeplabv3+', 'refinenet', 'indexnet']
 DECODER_KERNEL_SIZE = 5
 BACKBONE = 'mobilenetv2' # choose in ['mobilenetv2', 'vgg16']
-# BACKBONE = 'vgg16'
 INDEXNET = 'depthwise' # choose in ['holistic', 'depthwise']
 INDEX_MODE = 'm2o' # choose in ['o2o', 'm2o']
 
@@ -94,11 +91,8 @@ INDEX_MODE = 'm2o' # choose in ['o2o', 'm2o']
 #---------------------------------------------------------------------------------
 # training-related parameters
 BATCH_SIZE = 2
-# BATCH_SIZE = 4
-# CROP_SIZE = 320
-CROP_SIZE = 512
-LEARNING_RATE = 1e-6
-# LEARNING_RATE = 1e-2
+CROP_SIZE = 320
+LEARNING_RATE = 1e-5
 MOMENTUM = 0.9
 MULT = 100
 NUM_EPOCHS = 100
@@ -281,7 +275,6 @@ def validate(net, val_loader, epoch, args):
             inputs = torch.from_numpy(np.expand_dims(image.transpose(2, 0, 1), axis=0))
             
             # inference
-            # outputs = net(inputs).squeeze().cpu().numpy()
             outputs = net(inputs.cuda()).squeeze().cpu().numpy()
 
             alpha = cv.resize(outputs, dsize=(w,h), interpolation=cv.INTER_CUBIC)
@@ -424,12 +417,13 @@ def main():
         'conn': []
     }
     ################################################################################
-    checkpoint = torch.load("./indexnet_matting.pth.tar", map_location=lambda storage, loc: storage)
-    if 'state_dict' in checkpoint:
-        state_dict = checkpoint['state_dict']
-    else:
-        state_dict = checkpoint
-    net.load_state_dict(state_dict, False)
+    ################################################################################
+    checkpoint = torch.load("./pretrained/indexnet_matting.pth.tar")
+    # print(checkpoint['state_dict'].keys())
+    state_dict = checkpoint['state_dict']
+    state_dict = {k.replace("module.",""): v for k,v in state_dict.items()}
+    net.load_state_dict(state_dict)
+    # net.load_state_dict(checkpoint['state_dict'])
     ################################################################################
     
     print(args.restore_from)
