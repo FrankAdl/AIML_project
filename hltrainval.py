@@ -50,6 +50,8 @@ from hlmobilenetv2 import hlmobilenetv2
 from hlvggnet import hlvgg16
 from hldataset import AdobeImageMattingDataset, RandomCrop, RandomFlip, Normalize, ToTensor
 from utils import *
+from collections import OrderedDict
+
 
 from data_generator import *
 from config import cfg
@@ -351,37 +353,70 @@ def main():
     for item in arguments:
         print(item, ':\t' , arguments[item])
 
+###################################################### 
+    net = hlmobilenetv2(
+            pretrained=False,
+            freeze_bn=True, 
+            output_stride=32,
+            apply_aspp=True,
+            conv_operator='std_conv',
+            decoder='indexnet',
+            decoder_kernel_size=5,
+            indexnet='depthwise',
+            index_mode='m2o',
+            use_nonlinear=True,
+            use_context=True
+        )
+###################################################### 源代码
     # instantiate network
-    hlnet = hlbackbone[args.backbone]
-    net = hlnet(
-        pretrained=True,
-        freeze_bn=True, 
-        output_stride=args.output_stride, 
-        input_size=args.crop_size, 
-        apply_aspp=args.apply_aspp,
-        conv_operator=args.conv_operator,
-        decoder=args.decoder,
-        decoder_kernel_size=args.decoder_kernel_size,
-        indexnet=args.indexnet,
-        index_mode=args.index_mode,
-        use_nonlinear=args.use_nonlinear,
-        use_context=args.use_context,
-        sync_bn=args.sync_bn
-    )
-    
-    if args.backbone == 'mobilenetv2':
-        #################### 修改代码
-        net = net
-        ####################
+    # hlnet = hlbackbone[args.backbone]
+    # hlnet = hlmobilenetv2
+    # net = hlnet(
+    #     pretrained=True,
+    #     freeze_bn=True, 
+    #     output_stride=args.output_stride, # 32
+    #     input_size=args.crop_size, # 320
+    #     apply_aspp=args.apply_aspp, # True
+    #     conv_operator=args.conv_operator, # 'std_conv'
+    #     decoder=args.decoder, # indexnet
+    #     decoder_kernel_size=args.decoder_kernel_size, # 5
+    #     indexnet=args.indexnet, # 'depthwise'
+    #     index_mode=args.index_mode, # m2o
+    #     use_nonlinear=args.use_nonlinear, # True
+    #     use_context=args.use_context, # True
+    #     sync_bn=args.sync_bn # True
+    # )
+ 
+###################################################### 
+    try:
+        checkpoint = torch.load("./pretrained/indexnet_matting.pth.tar", map_location=device)
+        pretrained_dict = OrderedDict()
+        for key, value in checkpoint['state_dict'].items():
+            if 'module' in key:
+                key = key[7:]
+            pretrained_dict[key] = value
+    except:
+        raise Exception('Please download the pretrained model!')
+    net.load_state_dict(pretrained_dict)
+    net.to(device)
+    if torch.cuda.is_available():
+        net = nn.DataParallel(net)
+
+ 
+    ###################################################### 源代码   
+    # if args.backbone == 'mobilenetv2':
+    #     #################### 修改代码
+    #     net = net
+    #     ####################
         
-        #################### 源代码
-        # net = nn.DataParallel(net)
-        ############# 加载训练好的模型
+    #     #################### 源代码
+    #     net = nn.DataParallel(net)
+    #     ############# 加载训练好的模型
         
-    if args.sync_bn:
-        patch_replication_callback(net)
-    net.cuda()
-    
+    # if args.sync_bn:
+    #     patch_replication_callback(net)
+    # net.cuda()
+    ######################################################     
     # filter parameters
     pretrained_params = []
     learning_params = []
@@ -418,12 +453,12 @@ def main():
     }
     ################################################################################
     ################################################################################
-    checkpoint = torch.load("./pretrained/indexnet_matting.pth.tar")
-    # print(checkpoint['state_dict'].keys())
-    state_dict = checkpoint['state_dict']
-    state_dict = {k.replace("module.",""): v for k,v in state_dict.items()}
-    net.load_state_dict(state_dict)
-    # net.load_state_dict(checkpoint['state_dict'])
+    # checkpoint = torch.load("./pretrained/indexnet_matting.pth.tar")
+    # # print(checkpoint['state_dict'].keys())
+    # state_dict = checkpoint['state_dict']
+    # state_dict = {k.replace("module.",""): v for k,v in state_dict.items()}
+    # net.load_state_dict(state_dict)
+    # # net.load_state_dict(checkpoint['state_dict'])
     ################################################################################
     
     print(args.restore_from)
@@ -482,7 +517,7 @@ def main():
      
     train_loader = DataLoader(
         trainset,
-        batch_size=1,
+        batch_size=2,
         shuffle=True,
         num_workers=args.num_workers,
         worker_init_fn=worker_init_fn,
@@ -504,7 +539,7 @@ def main():
     
     val_loader = DataLoader(
         valset,
-        batch_size=1,
+        batch_size=2,
         shuffle=False,
         num_workers=0,
         pin_memory=True
@@ -521,7 +556,7 @@ def main():
         scheduler.step()
         np.random.seed()
         # train
-        # train(net, train_loader, optimizer, epoch+1, scheduler, args)
+        train(net, train_loader, optimizer, epoch+1, scheduler, args)
         # val
         validate(net, val_loader, epoch+1, args)
         # save checkpoint
