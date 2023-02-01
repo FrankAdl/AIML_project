@@ -167,6 +167,37 @@ def worker_init_fn(worker_id):
     np.random.seed(np.random.get_state()[1][0] + worker_id)
 
 # implementation of the çcomposition loss and alpha loss
+# def weighted_loss(pd, gt, wl=0.5, epsilon=1e-6):
+#     #pd: predict data是预测值， gt: ground truth是目标值
+    
+#     bs, _, h, w = pd.size() #batch size, height, width
+#     mask = gt[:, 1, :, :].view(bs, 1, h, w)  #从ground truth中获取对应的mask
+#     alpha_gt = gt[:, 0, :, :].view(bs, 1, h, w) #alpha的ground truth
+#     diff_alpha = (pd - alpha_gt) * mask 
+#     loss_alpha = torch.sqrt(diff_alpha * diff_alpha + epsilon ** 2)
+#     if mask.sum(dim=2).sum(dim=2) == 0:
+#         print("mask is 0")
+#         loss_alpha = loss_alpha.sum(dim=2).sum(dim=2) / 1
+#     else:
+#         # print(mask.sum(dim=2).sum(dim=2))
+#         loss_alpha = loss_alpha.sum(dim=2).sum(dim=2) / mask.sum(dim=2).sum(dim=2)
+#     loss_alpha = loss_alpha.sum() / bs
+
+#     fg = gt[:, 2:5, :, :] # foreground
+#     bg = gt[:, 5:8, :, :] # background
+#     c_p = pd * fg + (1 - pd) * bg # composition of prediction
+#     c_g = gt[:, 8:11, :, :] # composition of ground truth
+#     diff_color = (c_p - c_g) * mask
+#     loss_composition = torch.sqrt(diff_color * diff_color + epsilon ** 2)
+#     if mask.sum(dim=2).sum(dim=2) == 0:
+#         print("mask is 0")
+#         loss_composition = loss_composition.sum(dim=2).sum(dim=2) 
+#     else:
+#         loss_composition = loss_composition.sum(dim=2).sum(dim=2) / mask.sum(dim=2).sum(dim=2)
+#     loss_composition = loss_composition.sum() / bs
+
+#     return wl * loss_alpha + (1 - wl) * loss_composition
+    
 def weighted_loss(pd, gt, wl=0.5, epsilon=1e-6):
     #pd: predict data是预测值， gt: ground truth是目标值
     
@@ -175,12 +206,9 @@ def weighted_loss(pd, gt, wl=0.5, epsilon=1e-6):
     alpha_gt = gt[:, 0, :, :].view(bs, 1, h, w) #alpha的ground truth
     diff_alpha = (pd - alpha_gt) * mask 
     loss_alpha = torch.sqrt(diff_alpha * diff_alpha + epsilon ** 2)
-    if mask.sum(dim=2).sum(dim=2) == 0:
-        print("mask is 0")
-        loss_alpha = loss_alpha.sum(dim=2).sum(dim=2) / 1
-    else:
-        # print(mask.sum(dim=2).sum(dim=2))
-        loss_alpha = loss_alpha.sum(dim=2).sum(dim=2) / mask.sum(dim=2).sum(dim=2)
+    mask_sum = mask.sum(dim=2).sum(dim=2)
+    mask_sum = mask_sum.clamp(min=1e-9)  # add a small value to avoid division by zero
+    loss_alpha = loss_alpha.sum(dim=2).sum(dim=2) / mask_sum
     loss_alpha = loss_alpha.sum() / bs
 
     fg = gt[:, 2:5, :, :] # foreground
@@ -189,14 +217,13 @@ def weighted_loss(pd, gt, wl=0.5, epsilon=1e-6):
     c_g = gt[:, 8:11, :, :] # composition of ground truth
     diff_color = (c_p - c_g) * mask
     loss_composition = torch.sqrt(diff_color * diff_color + epsilon ** 2)
-    if mask.sum(dim=2).sum(dim=2) == 0:
-        print("mask is 0")
-        loss_composition = loss_composition.sum(dim=2).sum(dim=2) 
-    else:
-        loss_composition = loss_composition.sum(dim=2).sum(dim=2) / mask.sum(dim=2).sum(dim=2)
+    mask_sum = mask.sum(dim=2).sum(dim=2)
+    mask_sum = mask_sum.clamp(min=1e-9)  # add a small value to avoid division by zero
+    loss_composition = loss_composition.sum(dim=2).sum(dim=2) / mask_sum
     loss_composition = loss_composition.sum() / bs
 
     return wl * loss_alpha + (1 - wl) * loss_composition
+
 
 def train(net, train_loader, optimizer, epoch, scheduler, args):
     # switch to train mode
@@ -267,6 +294,7 @@ def validate(net, val_loader, epoch, args):
             image, targets = sample['image'], sample['alpha']
             
             h, w = image.size()[2:]
+            print(image.shape)
             image = image.squeeze().numpy().transpose(1, 2, 0)
             
             ###################################
@@ -556,7 +584,7 @@ def main():
         scheduler.step()
         np.random.seed()
         # train
-        train(net, train_loader, optimizer, epoch+1, scheduler, args)
+        # train(net, train_loader, optimizer, epoch+1, scheduler, args)
         # val
         validate(net, val_loader, epoch+1, args)
         # save checkpoint
