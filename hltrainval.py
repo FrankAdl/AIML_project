@@ -234,7 +234,8 @@ def train(net, train_loader, optimizer, epoch, scheduler, args):
     start = time()
     for i, sample in enumerate(train_loader):
         inputs, targets = sample['image'], sample['alpha']
-        
+        # print(inputs.shape)
+        # print(targets.shape)
         ###################################################
         inputs, targets = inputs.cuda(), targets.cuda()
         ###################################################
@@ -294,7 +295,8 @@ def validate(net, val_loader, epoch, args):
             image, targets = sample['image'], sample['alpha']
             
             h, w = image.size()[2:]
-            print(image.shape)
+            # print(image.shape)
+            # print(targets.shape)
             image = image.squeeze().numpy().transpose(1, 2, 0)
             
             ###################################
@@ -545,7 +547,7 @@ def main():
      
     train_loader = DataLoader(
         trainset,
-        batch_size=2,
+        batch_size=2, #args.batch_size
         shuffle=True,
         num_workers=args.num_workers,
         worker_init_fn=worker_init_fn,
@@ -554,7 +556,7 @@ def main():
     )
     
     valset = dataset(cfg, 
-                     phase = "val",
+                     phase = "test",
                      test_scale="origin",
                      crop_size=args.crop_size)
     
@@ -567,7 +569,7 @@ def main():
     
     val_loader = DataLoader(
         valset,
-        batch_size=2,
+        batch_size=1,
         shuffle=False,
         num_workers=0,
         pin_memory=True
