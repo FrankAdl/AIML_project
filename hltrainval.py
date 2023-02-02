@@ -94,10 +94,10 @@ INDEX_MODE = 'm2o' # choose in ['o2o', 'm2o']
 # training-related parameters
 BATCH_SIZE = 2
 CROP_SIZE = 320
-LEARNING_RATE = 1e-5
+LEARNING_RATE = 1e-5 #缩小
 MOMENTUM = 0.9
 MULT = 100
-NUM_EPOCHS = 100
+NUM_EPOCHS = 100 # 缩小
 NUM_CPU_WORKERS = 0
 PRINT_EVERY = 1
 RANDOM_SEED = 6
@@ -207,7 +207,8 @@ def weighted_loss(pd, gt, wl=0.5, epsilon=1e-6):
     diff_alpha = (pd - alpha_gt) * mask 
     loss_alpha = torch.sqrt(diff_alpha * diff_alpha + epsilon ** 2)
     mask_sum = mask.sum(dim=2).sum(dim=2)
-    mask_sum = mask_sum.clamp(min=1e-9)  # add a small value to avoid division by zero
+    # print(mask_sum)
+    mask_sum = mask_sum.clamp(min=10)  # add a small value to avoid division by zero
     loss_alpha = loss_alpha.sum(dim=2).sum(dim=2) / mask_sum
     loss_alpha = loss_alpha.sum() / bs
 
@@ -218,7 +219,7 @@ def weighted_loss(pd, gt, wl=0.5, epsilon=1e-6):
     diff_color = (c_p - c_g) * mask
     loss_composition = torch.sqrt(diff_color * diff_color + epsilon ** 2)
     mask_sum = mask.sum(dim=2).sum(dim=2)
-    mask_sum = mask_sum.clamp(min=1e-9)  # add a small value to avoid division by zero
+    mask_sum = mask_sum.clamp(min=10)  # add a small value to avoid division by zero
     loss_composition = loss_composition.sum(dim=2).sum(dim=2) / mask_sum
     loss_composition = loss_composition.sum() / bs
 
@@ -388,7 +389,7 @@ def main():
             pretrained=False,
             freeze_bn=True, 
             output_stride=32,
-            apply_aspp=True,
+            apply_aspp=True, 
             conv_operator='std_conv',
             decoder='indexnet',
             decoder_kernel_size=5,
@@ -606,3 +607,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
+    # 减小lr, epoch
+    # 用train.sh
