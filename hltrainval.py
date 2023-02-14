@@ -94,18 +94,20 @@ INDEX_MODE = 'm2o' # choose in ['o2o', 'm2o']
 # training-related parameters
 BATCH_SIZE = 2
 CROP_SIZE = 320
-LEARNING_RATE = 1e-5 #缩小
+LEARNING_RATE = 1e-9 #缩小
 MOMENTUM = 0.9
 MULT = 100
-NUM_EPOCHS = 100 # 缩小
+NUM_EPOCHS = 15 # 缩小
 NUM_CPU_WORKERS = 0
 PRINT_EVERY = 1
 RANDOM_SEED = 6
 WEIGHT_DECAY = 1e-4
 RECORD_EVERY = 20
 
+######################################################################
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-
+######################################################################
+# device = "cpu"
 
 hlbackbone = {
     'mobilenetv2': hlmobilenetv2,
@@ -207,8 +209,8 @@ def weighted_loss(pd, gt, wl=0.5, epsilon=1e-6):
     diff_alpha = (pd - alpha_gt) * mask 
     loss_alpha = torch.sqrt(diff_alpha * diff_alpha + epsilon ** 2)
     mask_sum = mask.sum(dim=2).sum(dim=2)
-    # print(mask_sum)
-    mask_sum = mask_sum.clamp(min=10)  # add a small value to avoid division by zero
+    mask_sum = mask_sum.clamp(min=10000)
+    # print(mask_sum)# add a small value to avoid division by zero
     loss_alpha = loss_alpha.sum(dim=2).sum(dim=2) / mask_sum
     loss_alpha = loss_alpha.sum() / bs
 
@@ -219,12 +221,49 @@ def weighted_loss(pd, gt, wl=0.5, epsilon=1e-6):
     diff_color = (c_p - c_g) * mask
     loss_composition = torch.sqrt(diff_color * diff_color + epsilon ** 2)
     mask_sum = mask.sum(dim=2).sum(dim=2)
-    mask_sum = mask_sum.clamp(min=10)  # add a small value to avoid division by zero
+    mask_sum = mask_sum.clamp(min=10000)
+    # print(mask_sum)# add a small value to avoid division by zero
     loss_composition = loss_composition.sum(dim=2).sum(dim=2) / mask_sum
     loss_composition = loss_composition.sum() / bs
 
     return wl * loss_alpha + (1 - wl) * loss_composition
 
+
+def calculate_two_nets_loss(pd, gt, pre_model_pred, wl = 0.5, epsilon = 1e-6):
+    # pd: 我们正在训练的模型的预测值
+    # gt: ground truth
+    # pre_model_pred: 另外一个pretrained模型的预测值
+    
+    bs, _, h, w = pd.size() #batch size, height, width
+    mask = gt[:, 1, :, :].view(bs, 1, h, w)  #get the corresponding mask from ground truth
+    alpha_gt = gt[:, 0, :, :].view(bs, 1, h, w) #alpha ground truth
+    diff_alpha = (pd - alpha_gt) * mask 
+    loss_alpha = torch.sqrt(diff_alpha * diff_alpha + epsilon ** 2)
+    mask_sum = mask.sum(dim=2).sum(dim=2)
+    mask_sum = mask_sum.clamp(min=1)
+    
+    loss_alpha = loss_alpha.sum(dim=2).sum(dim=2) / mask_sum
+    loss_alpha = loss_alpha.sum() / bs
+
+    fg = gt[:, 2:5, :, :] # foreground
+    bg = gt[:, 5:8, :, :] # background
+    c_p = pd * fg + (1 - pd) * bg # composition of prediction
+    c_g = gt[:, 8:11, :, :] # composition of ground truth
+    diff_color = (c_p - c_g) * mask
+    loss_composition = torch.sqrt(diff_color * diff_color + epsilon ** 2)
+    mask_sum = mask.sum(dim=2).sum(dim=2)
+    mask_sum = mask_sum.clamp(min=1)
+    # print(mask_sum)# add a small value to avoid division by zero
+    loss_composition = loss_composition.sum(dim=2).sum(dim=2) / mask_sum
+    loss_composition = loss_composition.sum() / bs
+    
+    # calculate new loss based on pre_model_pred
+    diff_pre_model = (pd - pre_model_pred) * mask
+    loss_pre_model = torch.sqrt(diff_pre_model * diff_pre_model + epsilon ** 2)
+    loss_pre_model = loss_pre_model.sum(dim=2).sum(dim=2) / mask_sum
+    loss_pre_model = loss_pre_model.sum() / bs
+    
+    return wl * loss_alpha + (1 - wl) * loss_composition + loss_pre_model
 
 def train(net, train_loader, optimizer, epoch, scheduler, args):
     # switch to train mode
@@ -272,7 +311,55 @@ def train(net, train_loader, optimizer, epoch, scheduler, args):
         start = time()
     net.train_loss['epoch_loss'].append(running_loss / (i+1))
 
+def train_two_nets(net, net2, train_loader, optimizer, epoch, scheduler, args):
+    # switch to train mode
+    net.train()
+    net2.eval()
+    
+    running_loss = 0.0
+    avg_frame_rate = 0.0
+    start = time()
+    for i, sample in enumerate(train_loader):
+        inputs, targets = sample['image'], sample['alpha']
+        # print(inputs.shape)
+        # print(targets.shape)
+        ###################################################
+        inputs, targets = inputs.cuda(), targets.cuda()
+        ###################################################
+        
+        
+        # forward
+        outputs = net(inputs)
+        outputs2 = net2(inputs)
+        # zero the parameter gradients
+        optimizer.zero_grad()
+        # compute loss
+        loss = calculate_two_nets_loss(outputs, targets, outputs2)
+        # backward + optimize
+        loss.backward()
+        optimizer.step()
+        # collect and print statistics
+        running_loss += loss.item()
 
+        end = time()
+        running_frame_rate = args.batch_size * float(1 / (end - start))
+        avg_frame_rate = (avg_frame_rate*i + running_frame_rate)/(i+1)
+        if i % args.record_every == args.record_every-1:
+            net.train_loss['running_loss'].append(running_loss / (i+1))
+        if i % args.print_every == args.print_every-1:
+            print('epoch: %d, train: %d/%d, '
+                  'loss: %.5f, frame: %.2fHz/%.2fHz' % (
+                      epoch,
+                      i+1,
+                      len(train_loader),
+                      running_loss / (i+1),
+                      running_frame_rate,
+                      avg_frame_rate
+                  ))
+        start = time()
+    net.train_loss['epoch_loss'].append(running_loss / (i+1))
+    
+    
 def validate(net, val_loader, epoch, args):
     # switch to eval mode
     net.eval()
@@ -398,6 +485,20 @@ def main():
             use_nonlinear=True,
             use_context=True
         )
+    
+    net2 = hlmobilenetv2(
+            pretrained=False,
+            freeze_bn=True, 
+            output_stride=32,
+            apply_aspp=True, 
+            conv_operator='std_conv',
+            decoder='indexnet',
+            decoder_kernel_size=5,
+            indexnet='depthwise',
+            index_mode='m2o',
+            use_nonlinear=True,
+            use_context=True
+        )
 ###################################################### 源代码
     # instantiate network
     # hlnet = hlbackbone[args.backbone]
@@ -429,9 +530,12 @@ def main():
     except:
         raise Exception('Please download the pretrained model!')
     net.load_state_dict(pretrained_dict)
+    net2.load_state_dict(pretrained_dict)
     net.to(device)
+    net2.to(device)
     if torch.cuda.is_available():
         net = nn.DataParallel(net)
+        net2 = nn.DataParallel(net2)
 
  
     ###################################################### 源代码   
@@ -548,7 +652,7 @@ def main():
      
     train_loader = DataLoader(
         trainset,
-        batch_size=2, #args.batch_size
+        batch_size=args.batch_size, #args.batch_size
         shuffle=True,
         num_workers=args.num_workers,
         worker_init_fn=worker_init_fn,
@@ -587,7 +691,8 @@ def main():
         scheduler.step()
         np.random.seed()
         # train
-        # train(net, train_loader, optimizer, epoch+1, scheduler, args)
+        train(net, train_loader, optimizer, epoch+1, scheduler, args)
+        # train_two_nets(net, net2, train_loader, optimizer, epoch+1, scheduler, args)
         # val
         validate(net, val_loader, epoch+1, args)
         # save checkpoint
@@ -610,3 +715,5 @@ if __name__ == "__main__":
     
     # 减小lr, epoch
     # 用train.sh
+    
+    # 
