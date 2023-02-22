@@ -52,9 +52,13 @@ from hldataset import AdobeImageMattingDataset, RandomCrop, RandomFlip, Normaliz
 from utils import *
 from collections import OrderedDict
 
-
-from data_generator import *
 from config import cfg
+two_augmentation = True
+return_dist = True
+if two_augmentation:
+  from data_generator_2_aug import *
+else:
+  from data_generator import *
 
 # prevent dataloader deadlock
 cv.setNumThreads(0)
@@ -68,7 +72,9 @@ SCALES = [1, 1.5, 2]
 # system-io-related parameters
 DATASET = 'AIML_Image_Matting'
 DATA_DIR = '/home/xiufeng/Code'
-EXP = 'indexnet_matting'
+# EXP = 'indexnet_matting'
+# EXP = "indexnet_matting_fixed_weighted_loss_transfer_learning_2_aug_jitter"
+EXP = "test_run"
 DATA_LIST = './train_fg.txt'
 DATA_VAL_LIST = './test.txt'
 RESTORE_FROM = 'model_ckpt.pth.tar'
@@ -97,7 +103,7 @@ CROP_SIZE = 320
 LEARNING_RATE = 1e-9 #缩小
 MOMENTUM = 0.9
 MULT = 100
-NUM_EPOCHS = 15 # 缩小
+NUM_EPOCHS = 16 # 缩小
 NUM_CPU_WORKERS = 0
 PRINT_EVERY = 1
 RANDOM_SEED = 6
@@ -229,7 +235,7 @@ def weighted_loss(pd, gt, wl=0.5, epsilon=1e-6):
     return wl * loss_alpha + (1 - wl) * loss_composition
 
 
-def calculate_two_nets_loss(pd, gt, pre_model_pred, wl = 0.5, epsilon = 1e-6):
+def calculate_two_nets_loss(pd, gt, pre_model_pred, wl = 0.5, epsilon = 1e-6, return_dist = False):
     # pd: 我们正在训练的模型的预测值
     # gt: ground truth
     # pre_model_pred: 另外一个pretrained模型的预测值
@@ -256,14 +262,54 @@ def calculate_two_nets_loss(pd, gt, pre_model_pred, wl = 0.5, epsilon = 1e-6):
     # print(mask_sum)# add a small value to avoid division by zero
     loss_composition = loss_composition.sum(dim=2).sum(dim=2) / mask_sum
     loss_composition = loss_composition.sum() / bs
+
+    # calculate new alpha loss based on pre_model_pred
+    diff_alpha2 = (pd - pre_model_pred) * mask
+    loss_alpha2 = torch.sqrt(diff_alpha2 * diff_alpha2 + epsilon ** 2)
+    loss_alpha2 = loss_alpha2.sum(dim=2).sum(dim=2) / mask_sum
+    loss_alpha2 = loss_alpha2.sum() / bs
+
+    # calculate new composition loss based on pre_model_pred
+    c_p = pd * fg + (1 - pd) * bg # composition of prediction of net 1
+    c_pre = pre_model_pred * fg + (1 - pre_model_pred) * bg # composition of prediction of net 2
+    diff_model = (c_p - c_pre) * mask
+    loss_composition2 = torch.sqrt(diff_model * diff_model + epsilon ** 2)
+    loss_composition2 = loss_composition2.sum(dim=2).sum(dim=2) / mask_sum
+    loss_composition2 = loss_composition2.sum() / bs
     
-    # calculate new loss based on pre_model_pred
-    diff_pre_model = (pd - pre_model_pred) * mask
-    loss_pre_model = torch.sqrt(diff_pre_model * diff_pre_model + epsilon ** 2)
-    loss_pre_model = loss_pre_model.sum(dim=2).sum(dim=2) / mask_sum
-    loss_pre_model = loss_pre_model.sum() / bs
+    loss1 = (wl * loss_alpha + (1 - wl) * loss_composition)
+    loss2 = (wl * loss_alpha2 + (1 - wl) * loss_composition2)
     
-    return wl * loss_alpha + (1 - wl) * loss_composition + loss_pre_model
+    if not return_dist:
+      return loss1 + loss2
+    else:
+    #########################
+      # （pred和gt） 和 （pred和pre_model_pred）进行 per-pixel相除 再average
+      c_g = gt[:, 8:11, :, :] # composition of ground truth
+      c_p = pd * fg + (1 - pd) * bg # composition of prediction of net 1
+      c_pre = pre_model_pred * fg + (1 - pre_model_pred) * bg # composition of prediction of net 2
+      # diff1 是 pred和gt
+      diff1_c = (c_p - c_g) 
+      diff1_c = torch.sqrt(diff1_c * diff1_c + epsilon ** 2)
+      diff1_p = (pd - alpha_gt)
+      diff1_p = torch.sqrt(diff1_p * diff1_p + epsilon ** 2)
+      diff1 = diff1_c + diff1_p
+      # diff2 是 pred和pre_model_pred
+      diff2_c = (c_p - c_pre) 
+      diff2_c = torch.sqrt(diff2_c * diff2_c + epsilon ** 2)
+      diff2_p = (pd - pre_model_pred)
+      diff2_p = torch.sqrt(diff2_p * diff2_p + epsilon ** 2)
+      diff2 = diff2_c + diff2_p
+      # per pixel相除
+      loss = diff1 / diff2
+      loss = loss * mask
+      loss = loss.sum(dim=2).sum(dim=2) / mask_sum
+      loss = loss.mean()
+      return loss
+    # print(dist)
+    # print(loss1/dist)
+
+    
 
 def train(net, train_loader, optimizer, epoch, scheduler, args):
     # switch to train mode
@@ -274,6 +320,7 @@ def train(net, train_loader, optimizer, epoch, scheduler, args):
     start = time()
     for i, sample in enumerate(train_loader):
         inputs, targets = sample['image'], sample['alpha']
+        # 
         # print(inputs.shape)
         # print(targets.shape)
         ###################################################
@@ -311,7 +358,7 @@ def train(net, train_loader, optimizer, epoch, scheduler, args):
         start = time()
     net.train_loss['epoch_loss'].append(running_loss / (i+1))
 
-def train_two_nets(net, net2, train_loader, optimizer, epoch, scheduler, args):
+def train_two_nets(net, net2, train_loader, optimizer, epoch, scheduler, args, update_weight = True, two_aug = two_augmentation, return_dist = False):
     # switch to train mode
     net.train()
     net2.eval()
@@ -321,23 +368,40 @@ def train_two_nets(net, net2, train_loader, optimizer, epoch, scheduler, args):
     start = time()
     for i, sample in enumerate(train_loader):
         inputs, targets = sample['image'], sample['alpha']
-        # print(inputs.shape)
-        # print(targets.shape)
-        ###################################################
         inputs, targets = inputs.cuda(), targets.cuda()
+        if two_aug:
+          inputs2, targets2 = sample['image2'], sample['alpha2']
+          inputs2, targets2 = inputs2.cuda(), targets2.cuda()
+          outputs2 = net2(inputs2)
+          outputs = net(inputs)
         ###################################################
-        
-        
+        ###################################################
         # forward
-        outputs = net(inputs)
-        outputs2 = net2(inputs)
+        else:
+          outputs = net(inputs)
+          outputs2 = net2(inputs)
+        # print(outputs.shape)
+        # print(outputs2.shape)
         # zero the parameter gradients
         optimizer.zero_grad()
         # compute loss
-        loss = calculate_two_nets_loss(outputs, targets, outputs2)
+        loss = calculate_two_nets_loss(outputs, targets, outputs2, return_dist = return_dist)
         # backward + optimize
         loss.backward()
         optimizer.step()
+        
+        ######################################################
+        # update weights
+        if update_weight:
+            alpha = 0.5  # alpha 是加权因子
+            net_weight_dict = net.state_dict()
+            net2_weight_dict = net2.state_dict()
+            for name in net2_weight_dict:
+                if name in net_weight_dict:
+                    net2_weight_dict[name] = alpha * net_weight_dict[name] + (1 - alpha) * net2_weight_dict[name]
+            net2.load_state_dict(net_weight_dict)
+        ######################################################
+        
         # collect and print statistics
         running_loss += loss.item()
 
@@ -396,6 +460,7 @@ def validate(net, val_loader, epoch, args):
             
             # inference
             outputs = net(inputs.cuda()).squeeze().cpu().numpy()
+            # outputs = net(inputs).squeeze().cpu().numpy()
 
             alpha = cv.resize(outputs, dsize=(w,h), interpolation=cv.INTER_CUBIC)
             alpha = np.clip(alpha, 0, 1) * 255.
@@ -470,7 +535,7 @@ def main():
     arguments = vars(args)
     for item in arguments:
         print(item, ':\t' , arguments[item])
-
+ 
 ###################################################### 
     net = hlmobilenetv2(
             pretrained=False,
@@ -485,20 +550,21 @@ def main():
             use_nonlinear=True,
             use_context=True
         )
-    
+
     net2 = hlmobilenetv2(
-            pretrained=False,
-            freeze_bn=True, 
-            output_stride=32,
-            apply_aspp=True, 
-            conv_operator='std_conv',
-            decoder='indexnet',
-            decoder_kernel_size=5,
-            indexnet='depthwise',
-            index_mode='m2o',
-            use_nonlinear=True,
-            use_context=True
-        )
+          pretrained=False,
+          freeze_bn=True, 
+          output_stride=32,
+          apply_aspp=True, 
+          conv_operator='std_conv',
+          decoder='indexnet',
+          decoder_kernel_size=5,
+          indexnet='depthwise',
+          index_mode='m2o',
+          use_nonlinear=True,
+          use_context=True
+      )
+    
 ###################################################### 源代码
     # instantiate network
     # hlnet = hlbackbone[args.backbone]
@@ -530,12 +596,12 @@ def main():
     except:
         raise Exception('Please download the pretrained model!')
     net.load_state_dict(pretrained_dict)
-    net2.load_state_dict(pretrained_dict)
     net.to(device)
     net2.to(device)
     if torch.cuda.is_available():
         net = nn.DataParallel(net)
         net2 = nn.DataParallel(net2)
+    
 
  
     ###################################################### 源代码   
@@ -641,7 +707,7 @@ def main():
     #     train=True,
     #     transform=composed_transform_train
     # )
-    cfg.merge_from_file('/home/xiufeng/Code/config/aiml.yaml')
+    cfg.merge_from_file('/content/drive/MyDrive/AIML/AIML_project/config/aiml.yaml')
     
     trainset = dataset(cfg, 
                        phase = "train",
@@ -656,7 +722,7 @@ def main():
         shuffle=True,
         num_workers=args.num_workers,
         worker_init_fn=worker_init_fn,
-        pin_memory=True,
+        # pin_memory=True,
         drop_last=True
     )
     
@@ -677,7 +743,7 @@ def main():
         batch_size=1,
         shuffle=False,
         num_workers=0,
-        pin_memory=True
+        # pin_memory=True
     )
 
     print('alchemy start...')
@@ -687,14 +753,17 @@ def main():
     
     resume_epoch = -1 if start_epoch == 0 else start_epoch
     scheduler = MultiStepLR(optimizer, milestones=[20, 26], gamma=0.1, last_epoch=resume_epoch)
+    # torch.backends.cuda.max_split_size_mb = 512 
     for epoch in range(start_epoch, args.num_epochs):
+        # torch.cuda.empty_cache()
         scheduler.step()
         np.random.seed()
         # train
-        train(net, train_loader, optimizer, epoch+1, scheduler, args)
-        # train_two_nets(net, net2, train_loader, optimizer, epoch+1, scheduler, args)
-        # val
-        validate(net, val_loader, epoch+1, args)
+        # train(net, train_loader, optimizer, epoch+1, scheduler, args)
+        train_two_nets(net, net2, train_loader, optimizer, epoch+1, scheduler, args, update_weight = True, two_aug = two_augmentation, return_dist = return_dist)
+
+        if epoch == args.num_epochs - 1:
+          validate(net, val_loader, epoch+1, args)
         # save checkpoint
         state = {
             'state_dict': net.state_dict(),
